@@ -39,8 +39,6 @@
         hr { margin: 20px 0; }
         .whatsapp-btn { background: #25D366; color: white; border: none; padding: 5px 10px; border-radius: 20px; cursor: pointer; font-size: 0.7rem; }
         .edit-btn { background: #ff9800; }
-        .search-box { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 15px; align-items: center; }
-        .auto-refresh { font-size: 0.7rem; color: #666; margin-right: 10px; }
         @media (max-width: 900px) {
             .grid-2 { grid-template-columns: 1fr; }
             .content { padding: 15px; }
@@ -92,7 +90,7 @@
     let currentUser = null;
     let autoRefreshInterval = null;
 
-    // مودال مخصص ديناميكي
+    // مودال مخصص
     let modalResolve = null;
     const modalEl = document.getElementById('customModal');
     const modalTitle = document.getElementById('modalTitle');
@@ -215,21 +213,121 @@
     function startAutoRefresh() {
         if (autoRefreshInterval) clearInterval(autoRefreshInterval);
         autoRefreshInterval = setInterval(async () => {
+            if (!currentUser) return;
             const indicator = document.getElementById('refreshIndicator');
             if (indicator) indicator.style.opacity = '1';
             try {
-                if (currentUser && currentUser.role === 'accountant') {
-                    await refreshAccountantData();
-                } else if (currentUser && currentUser.role !== 'accountant') {
-                    await refreshDriverData();
+                if (currentUser.role === 'accountant') {
+                    await refreshAccountantDataPartial();
+                } else {
+                    await refreshDriverDataPartial();
                 }
             } catch(e) { console.warn("تحديث تلقائي فشل", e); }
             setTimeout(() => { if(indicator) indicator.style.opacity = '0'; }, 500);
         }, 10000);
     }
 
-    async function refreshAccountantData() { await renderAccountantPanel(true); }
-    async function refreshDriverData() { await renderDriverPanel(true); }
+    // تحديث جزئي للمحاسب: تحديث الإشكالات وتأكيد الاستلامات فقط
+    async function refreshAccountantDataPartial() {
+        if (!currentUser || currentUser.role !== 'accountant') return;
+        try {
+            const [invoicesRes, pendingPaymentsRes, issuesRes] = await Promise.all([
+                callGoogleScript('getAllInvoicesForAccountant', {}),
+                callGoogleScript('getUnconfirmedPayments', {}),
+                callGoogleScript('getAllIssues', {})
+            ]);
+            const allInvoices = invoicesRes.data.invoices || [];
+            const driversList = invoicesRes.data.drivers || [];
+            const pendingPayments = pendingPaymentsRes.data.payments || [];
+            const issues = issuesRes.data.issues || [];
+
+            // تحديث قسم الإشكالات
+            const issuesContainer = document.getElementById('issuesContainer');
+            if (issuesContainer) {
+                if (issues.length === 0) {
+                    issuesContainer.innerHTML = '<div>لا توجد ملاحظات مسجلة</div>';
+                } else {
+                    let html = `<div class="issues-grid">`;
+                    for (let iss of issues) {
+                        html += `<div class="issue-card">
+                                    <div class="card-field"><strong>الزبون:</strong> ${iss.customer_name || '-'}</div>
+                                    <div class="card-field"><strong>السائق:</strong> ${iss.driver_name || '-'}</div>
+                                    <div class="card-field"><strong>الملاحظة:</strong> ${iss.description}</div>
+                                    <div class="card-field"><strong>التاريخ:</strong> ${new Date(iss.created_at).toLocaleString()}</div>
+                                    <button class="small resolveIssueBtn" data-id="${iss.id}">✔️ تم الحل</button>
+                                </div>`;
+                    }
+                    html += `</div>`;
+                    issuesContainer.innerHTML = html;
+                    // إعادة ربط أزرار حل المشكلات
+                    document.querySelectorAll('.resolveIssueBtn').forEach(btn => {
+                        btn.removeEventListener('click', resolveIssueHandler);
+                        btn.addEventListener('click', resolveIssueHandler);
+                    });
+                }
+            }
+
+            // تحديث قسم تأكيد الاستلامات
+            const pendingContainer = document.getElementById('pendingPaymentsContainer');
+            if (pendingContainer) {
+                if (pendingPayments.length === 0) {
+                    pendingContainer.innerHTML = '<div>لا توجد عمليات بانتظار التأكيد</div>';
+                } else {
+                    let html = `<div class="pending-grid">`;
+                    for (let pay of pendingPayments) {
+                        const issueBadge = pay.issue_flag ? '<span class="badge-issue">⚠️ نعم</span>' : 'لا';
+                        html += `<div class="pending-card">
+                                    <div class="card-field"><strong>القائمة (الزبون):</strong> ${pay.customer_name}</div>
+                                    <div class="card-field"><strong>السائق:</strong> ${pay.driver_name}</div>
+                                    <div class="card-field"><strong>المبلغ:</strong> ${pay.amount_paid} د.ع</div>
+                                    <div class="card-field"><strong>ملاحظات:</strong> ${pay.notes || '-'}</div>
+                                    <div class="card-field"><strong>مشكلة:</strong> ${issueBadge}</div>
+                                    <button class="small confirmPayBtn" data-id="${pay.id}" data-phone="${pay.customer_phone}" data-customer="${pay.customer_name}" data-amount="${pay.amount_paid}">✔️ تأكيد الاستلام</button>
+                                </div>`;
+                    }
+                    html += `</div><small>⚠️ يجب الاتصال بالسائق قبل التأكيد</small>`;
+                    pendingContainer.innerHTML = html;
+                    // إعادة ربط أزرار التأكيد
+                    document.querySelectorAll('.confirmPayBtn').forEach(btn => {
+                        btn.removeEventListener('click', confirmPaymentHandler);
+                        btn.addEventListener('click', confirmPaymentHandler);
+                    });
+                }
+            }
+        } catch(e) { console.warn(e); }
+    }
+
+    async function refreshDriverDataPartial() {
+        if (!currentUser || currentUser.role === 'accountant') return;
+        await renderDriverPanel(true); // للسائق لا مشكلة في إعادة بناء كامل لأنه لا يحتوي على نماذج إدخال متقدمة
+    }
+
+    // دوال معالجة الأحداث للتحديث الجزئي
+    async function resolveIssueHandler(e) {
+        const issueId = parseInt(e.currentTarget.dataset.id);
+        await callGoogleScript('resolveIssue', { issueId });
+        await showAlert("تم حل المشكلة");
+        refreshAccountantDataPartial();
+    }
+
+    async function confirmPaymentHandler(e) {
+        const payId = parseInt(e.currentTarget.dataset.id);
+        const phone = e.currentTarget.dataset.phone;
+        const customer = e.currentTarget.dataset.customer;
+        const amount = e.currentTarget.dataset.amount;
+        if (confirm("هل اتصلت بالسائق وتأكدت من صحة الاستلام؟")) {
+            await callGoogleScript('confirmPayment', { paymentId: payId });
+            await showAlert("تم تأكيد الاستلام بنجاح");
+            if (phone) {
+                const sendWhats = confirm(`هل تريد إرسال إشعار واتساب للزبون ${customer}؟`);
+                if (sendWhats) {
+                    const msg = encodeURIComponent(`مرحباً، تم استلام مبلغ ${amount} دينار من قيمتك. شكراً لك.`);
+                    window.open(`https://wa.me/${phone}?text=${msg}`, '_blank');
+                }
+            }
+            refreshAccountantDataPartial();
+        }
+    }
 
     // واجهة تسجيل الدخول
     function renderLogin() {
@@ -238,7 +336,6 @@
         container.innerHTML = `
             <div class="login-box">
                 <h2>🔐 تسجيل الدخول</h2>
-                <p>سائق / محاسب</p>
                 <input type="text" id="loginUsername" placeholder="اسم المستخدم" autocomplete="off">
                 <input type="password" id="loginPassword" placeholder="كلمة المرور">
                 <button id="doLoginBtn" class="btn-primary">دخول</button>
@@ -266,8 +363,9 @@
         });
     }
 
-    // واجهة السائق (مع إظهار رقم الزبون وعدم السماح بالاستلام للقوائم الآجلة)
+    // واجهة السائق (مع إظهار رقم الزبون)
     async function renderDriverPanel(isRefresh = false) {
+        if (!currentUser) return;
         const container = document.getElementById('mainContent');
         if (!isRefresh) container.innerHTML = `<div>جاري تحميل القوائم...</div>`;
         try {
@@ -333,6 +431,7 @@
     }
 
     async function loadDriverPendingPayments() {
+        if (!currentUser) return;
         try {
             const res = await callGoogleScript('getUnconfirmedPayments', {});
             const allPending = res.data.payments || [];
@@ -398,10 +497,10 @@
         } catch(err) { await showAlert(err.message); }
     }
 
-    // واجهة المحاسب (مع نموذج إنشاء القوائم)
-    async function renderAccountantPanel(isRefresh = false) {
+    // واجهة المحاسب (بناء أولي كامل، ثم تحديث جزئي)
+    async function renderAccountantPanel() {
         const container = document.getElementById('mainContent');
-        if (!isRefresh) container.innerHTML = `<div>جاري تحميل لوحة المحاسب...</div>`;
+        container.innerHTML = `<div>جاري تحميل لوحة المحاسب...</div>`;
         try {
             const [invoicesRes, pendingPaymentsRes, issuesRes] = await Promise.all([
                 callGoogleScript('getAllInvoicesForAccountant', {}),
@@ -418,45 +517,12 @@
             
             let html = `<div class="grid-2"><div class="left-col">`;
             
-            // 1. قسم الإشكالات والملاحظات
-            html += `<div class="card"><div class="card-title">📝 إشكالات وملاحظات السائقين</div>`;
-            if (issues.length === 0) html += `<div>لا توجد ملاحظات مسجلة</div>`;
-            else {
-                html += `<div class="issues-grid">`;
-                for (let iss of issues) {
-                    html += `<div class="issue-card">
-                                <div class="card-field"><strong>الزبون:</strong> ${iss.customer_name || '-'}</div>
-                                <div class="card-field"><strong>السائق:</strong> ${iss.driver_name || '-'}</div>
-                                <div class="card-field"><strong>الملاحظة:</strong> ${iss.description}</div>
-                                <div class="card-field"><strong>التاريخ:</strong> ${new Date(iss.created_at).toLocaleString()}</div>
-                                <button class="small resolveIssueBtn" data-id="${iss.id}">✔️ تم الحل</button>
-                            </div>`;
-                }
-                html += `</div>`;
-            }
-            html += `</div>`;
+            // 1. قسم الإشكالات مع container محدد
+            html += `<div class="card"><div class="card-title">📝 إشكالات وملاحظات السائقين</div><div id="issuesContainer"></div></div>`;
+            // 2. قسم تأكيد الاستلامات مع container محدد
+            html += `<div class="card"><div class="card-title">✅ تأكيد استلامات السائقين</div><div id="pendingPaymentsContainer"></div></div>`;
             
-            // 2. قسم تأكيد الاستلامات
-            html += `<div class="card"><div class="card-title">✅ تأكيد استلامات السائقين</div>`;
-            if (pendingPayments.length === 0) html += `<div>لا توجد عمليات بانتظار التأكيد</div>`;
-            else {
-                html += `<div class="pending-grid">`;
-                for (let pay of pendingPayments) {
-                    const issueBadge = pay.issue_flag ? '<span class="badge-issue">⚠️ نعم</span>' : 'لا';
-                    html += `<div class="pending-card">
-                                <div class="card-field"><strong>القائمة (الزبون):</strong> ${pay.customer_name}</div>
-                                <div class="card-field"><strong>السائق:</strong> ${pay.driver_name}</div>
-                                <div class="card-field"><strong>المبلغ:</strong> ${pay.amount_paid} د.ع</div>
-                                <div class="card-field"><strong>ملاحظات:</strong> ${pay.notes || '-'}</div>
-                                <div class="card-field"><strong>مشكلة:</strong> ${issueBadge}</div>
-                                <button class="small confirmPayBtn" data-id="${pay.id}" data-phone="${pay.customer_phone}" data-customer="${pay.customer_name}" data-amount="${pay.amount_paid}">✔️ تأكيد الاستلام</button>
-                            </div>`;
-                }
-                html += `</div><small>⚠️ يجب الاتصال بالسائق قبل التأكيد</small>`;
-            }
-            html += `</div>`;
-            
-            // 3. قسم إدارة القوائم (مع نموذج إنشاء جديد)
+            // 3. قسم إدارة القوائم (يبقى كما هو دون تحديث تلقائي كامل)
             html += `<div class="card"><div class="card-title">📋 إدارة القوائم (سندات قبض)</div>
                         <div class="create-form">
                             <div class="form-inline">
@@ -497,7 +563,49 @@
             html += `</div></div></div></div>`;
             container.innerHTML = html;
             
-            // وظيفة عرض القوائم بعد الفلترة
+            // تعبئة الأقسام القابلة للتحديث
+            function fillIssues() {
+                const issuesContainer = document.getElementById('issuesContainer');
+                if (issues.length === 0) issuesContainer.innerHTML = '<div>لا توجد ملاحظات مسجلة</div>';
+                else {
+                    let issHtml = `<div class="issues-grid">`;
+                    for (let iss of issues) {
+                        issHtml += `<div class="issue-card">
+                                    <div class="card-field"><strong>الزبون:</strong> ${iss.customer_name || '-'}</div>
+                                    <div class="card-field"><strong>السائق:</strong> ${iss.driver_name || '-'}</div>
+                                    <div class="card-field"><strong>الملاحظة:</strong> ${iss.description}</div>
+                                    <div class="card-field"><strong>التاريخ:</strong> ${new Date(iss.created_at).toLocaleString()}</div>
+                                    <button class="small resolveIssueBtn" data-id="${iss.id}">✔️ تم الحل</button>
+                                </div>`;
+                    }
+                    issHtml += `</div>`;
+                    issuesContainer.innerHTML = issHtml;
+                }
+            }
+            function fillPending() {
+                const pendingContainer = document.getElementById('pendingPaymentsContainer');
+                if (pendingPayments.length === 0) pendingContainer.innerHTML = '<div>لا توجد عمليات بانتظار التأكيد</div>';
+                else {
+                    let pendHtml = `<div class="pending-grid">`;
+                    for (let pay of pendingPayments) {
+                        const issueBadge = pay.issue_flag ? '<span class="badge-issue">⚠️ نعم</span>' : 'لا';
+                        pendHtml += `<div class="pending-card">
+                                    <div class="card-field"><strong>القائمة (الزبون):</strong> ${pay.customer_name}</div>
+                                    <div class="card-field"><strong>السائق:</strong> ${pay.driver_name}</div>
+                                    <div class="card-field"><strong>المبلغ:</strong> ${pay.amount_paid} د.ع</div>
+                                    <div class="card-field"><strong>ملاحظات:</strong> ${pay.notes || '-'}</div>
+                                    <div class="card-field"><strong>مشكلة:</strong> ${issueBadge}</div>
+                                    <button class="small confirmPayBtn" data-id="${pay.id}" data-phone="${pay.customer_phone}" data-customer="${pay.customer_name}" data-amount="${pay.amount_paid}">✔️ تأكيد الاستلام</button>
+                                </div>`;
+                    }
+                    pendHtml += `</div><small>⚠️ يجب الاتصال بالسائق قبل التأكيد</small>`;
+                    pendingContainer.innerHTML = pendHtml;
+                }
+            }
+            fillIssues();
+            fillPending();
+            
+            // وظيفة عرض القوائم
             const renderInvoicesList = () => {
                 const searchName = document.getElementById('searchCustomer')?.value.toLowerCase() || '';
                 const searchDriverId = document.getElementById('searchDriver')?.value;
@@ -539,7 +647,7 @@
                 }
                 invHtml += `</div>`;
                 containerInv.innerHTML = invHtml;
-                // attach events
+                // ربط أحداث التعديل
                 document.querySelectorAll('.editInvoiceBtn').forEach(btn => {
                     btn.addEventListener('click', () => editInvoice(parseInt(btn.dataset.id), btn.dataset.customer, btn.dataset.phone, btn.dataset.driver, btn.dataset.type, btn.dataset.total));
                 });
@@ -578,7 +686,7 @@
                     created_at: new Date().toISOString()
                 } });
                 await showAlert("تم إنشاء القائمة");
-                renderAccountantPanel(true);
+                renderAccountantPanel(); // إعادة بناء كامل بعد الإضافة (لأن القوائم تغيرت)
             });
             
             document.getElementById('addDriverBtn')?.addEventListener('click', async () => {
@@ -588,42 +696,21 @@
                 if (!name || !username || !pwd) { await showAlert("املأ جميع الحقول"); return; }
                 await callGoogleScript('createDriver', { driver: { name, username, password: pwd } });
                 await showAlert("تمت إضافة السائق");
-                renderAccountantPanel(true);
+                renderAccountantPanel();
             });
             
-            document.querySelectorAll('.confirmPayBtn').forEach(btn => {
-                btn.addEventListener('click', async () => {
-                    const payId = parseInt(btn.dataset.id);
-                    const phone = btn.dataset.phone;
-                    const customer = btn.dataset.customer;
-                    const amount = btn.dataset.amount;
-                    if (confirm("هل اتصلت بالسائق وتأكدت من صحة الاستلام؟")) {
-                        await callGoogleScript('confirmPayment', { paymentId: payId });
-                        await showAlert("تم تأكيد الاستلام بنجاح");
-                        if (phone) {
-                            const sendWhats = confirm(`هل تريد إرسال إشعار واتساب للزبون ${customer}؟`);
-                            if (sendWhats) {
-                                const msg = encodeURIComponent(`مرحباً، تم استلام مبلغ ${amount} دينار من قيمتك. شكراً لك.`);
-                                window.open(`https://wa.me/${phone}?text=${msg}`, '_blank');
-                            }
-                        }
-                        renderAccountantPanel(true);
-                    }
-                });
-            });
-            
+            // ربط الأحداث الثابتة (بما فيها الأزرار داخل الأقسام القابلة للتحديث)
             document.querySelectorAll('.resolveIssueBtn').forEach(btn => {
-                btn.addEventListener('click', async () => {
-                    const issueId = parseInt(btn.dataset.id);
-                    await callGoogleScript('resolveIssue', { issueId });
-                    await showAlert("تم حل المشكلة");
-                    renderAccountantPanel(true);
-                });
+                btn.removeEventListener('click', resolveIssueHandler);
+                btn.addEventListener('click', resolveIssueHandler);
+            });
+            document.querySelectorAll('.confirmPayBtn').forEach(btn => {
+                btn.removeEventListener('click', confirmPaymentHandler);
+                btn.addEventListener('click', confirmPaymentHandler);
             });
             
         } catch(err) {
-            if (!isRefresh) container.innerHTML = `<div class="error-msg">خطأ: ${err.message}</div>`;
-            else console.warn(err);
+            container.innerHTML = `<div class="error-msg">خطأ: ${err.message}</div>`;
         }
     }
     
@@ -655,17 +742,19 @@
             });
             await callGoogleScript('addIssue', { issue: { invoice_id: id, driver_id: currentUser.id, description: `تم تعديل القائمة بواسطة المحاسب. السبب: ${result.reason}` } });
             await showAlert("تم تعديل القائمة بنجاح");
-            renderAccountantPanel(true);
+            renderAccountantPanel();
         } catch(err) { await showAlert(err.message); }
     }
     
-    document.getElementById('logoutBtn')?.addEventListener('click', () => {
+    // تسجيل الخروج
+    const logoutHandler = () => {
+        if (autoRefreshInterval) clearInterval(autoRefreshInterval);
         currentUser = null;
         saveSession();
-        if (autoRefreshInterval) clearInterval(autoRefreshInterval);
         document.getElementById('userInfoArea').style.display = 'none';
         renderLogin();
-    });
+    };
+    document.getElementById('logoutBtn')?.addEventListener('click', logoutHandler);
     
     if (!restoreSession()) renderLogin();
 </script>
